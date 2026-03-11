@@ -6,5 +6,5 @@ target_link_libraries(dois-sensores-distancia
                      pico_stdlib 
                      hardware_pwm
                      hardware_rtc
-                     freertos )
+                 )
 pico_add_extra_outputs(dois-sensores-distancia)
