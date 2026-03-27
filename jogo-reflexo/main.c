@@ -1,8 +1,8 @@
 #include <stdio.h>
-
-#include "hardware/gpio.h"
+#include <stdbool.h>
 #include "pico/stdlib.h"
 #include "pico/time.h"
+#include "hardware/gpio.h"
 
 #define BTN_G 28
 #define BTN_R 20
@@ -27,18 +27,36 @@ typedef enum {
     OVER
 } game_state_t;
 
-static const color_t sequence[10] = {
-    COLOR_Y, COLOR_G, COLOR_R, COLOR_Y, COLOR_G,
-    COLOR_Y, COLOR_R, COLOR_Y, COLOR_G, COLOR_Y
-};
+typedef struct {
+    volatile game_state_t state;
+    volatile int round_len;
+    volatile int pnts;
+    volatile int display_pos;
+    volatile int display_phase;
+    volatile int input_pos;
+    volatile bool score_printed;
+} game_t;
 
-volatile game_state_t state = IDLE;
-volatile int round_len = 0;      // rodada atual: 1..10
-volatile int pnts = 0;           // pontos finais
-volatile int display_pos = 0;    // posição na sequência mostrada
-volatile int display_phase = 0;   // 0 = LED ON, 1 = LED OFF
-volatile int input_pos = 0;      // posição esperada da resposta
-volatile bool score_printed = false;
+static game_t *game(void) {
+    static game_t g = {
+        .state = IDLE,
+        .round_len = 0,
+        .pnts = 0,
+        .display_pos = 0,
+        .display_phase = 0,
+        .input_pos = 0,
+        .score_printed = false
+    };
+    return &g;
+}
+
+static const color_t *sequence(void) {
+    static const color_t seq[10] = {
+        COLOR_Y, COLOR_G, COLOR_R, COLOR_Y, COLOR_G,
+        COLOR_Y, COLOR_R, COLOR_Y, COLOR_G, COLOR_Y
+    };
+    return seq;
+}
 
 static inline void all_leds_off(void) {
     gpio_put(LED_G, 0);
@@ -49,14 +67,8 @@ static inline void all_leds_off(void) {
 static inline void show_color(color_t c) {
     all_leds_off();
     if (c == COLOR_G) gpio_put(LED_G, 1);
-    if (c == COLOR_Y) gpio_put(LED_Y, 1);
-    if (c == COLOR_R) gpio_put(LED_R, 1);
-}
-
-static inline color_t gpio_to_color(uint gpio) {
-    if (gpio == BTN_Y) return COLOR_Y;
-    if (gpio == BTN_G) return COLOR_G;
-    return COLOR_R;
+    else if (c == COLOR_Y) gpio_put(LED_Y, 1);
+    else if (c == COLOR_R) gpio_put(LED_R, 1);
 }
 
 static inline bool button_matches_color(uint gpio, color_t c) {
@@ -65,49 +77,66 @@ static inline bool button_matches_color(uint gpio, color_t c) {
            (gpio == BTN_R && c == COLOR_R);
 }
 
+static inline color_t gpio_to_color(uint gpio) {
+    if (gpio == BTN_Y) return COLOR_Y;
+    if (gpio == BTN_G) return COLOR_G;
+    return COLOR_R;
+}
+
 static void start_round(void) {
-    input_pos = 0;
-    display_pos = 0;
-    display_phase = 0;
-    state = SHOWING;
-    show_color(sequence[0]);
+    game_t *g = game();
+    const color_t *seq = sequence();
+
+    g->input_pos = 0;
+    g->display_pos = 0;
+    g->display_phase = 1;
+    g->state = SHOWING;
+
+    show_color(seq[0]);
 }
 
 static void finish_game(void) {
-    state = OVER;
+    game_t *g = game();
+    g->state = OVER;
     all_leds_off();
 }
 
-static void advance_round_or_finish(void) {
-    pnts = round_len;
+static void complete_round(void) {
+    game_t *g = game();
 
-    if (round_len >= 10) {
+    g->pnts = g->round_len;
+
+    if (g->round_len >= 10) {
         finish_game();
-    } else {
-        round_len++;
-        start_round();
+        return;
     }
+
+    g->round_len++;
+    start_round();
 }
 
 bool sequence_timer_cb(struct repeating_timer *t) {
     (void)t;
 
-    if (state != SHOWING) {
+    game_t *g = game();
+    const color_t *seq = sequence();
+
+    if (g->state != SHOWING) {
         return true;
     }
 
-    if (display_phase == 0) {
+    if (g->display_phase == 1) {
         all_leds_off();
-        display_phase = 1;
-    } else {
-        display_pos++;
-        if (display_pos >= round_len) {
-            all_leds_off();
-            state = INPUT;
+        g->display_phase = 0;
+
+        if (g->display_pos + 1 >= g->round_len) {
+            g->state = INPUT;
         } else {
-            show_color(sequence[display_pos]);
-            display_phase = 0;
+            g->display_pos++;
         }
+    } else {
+        show_color(seq[g->display_pos]);
+        g->display_phase = 1;
     }
 
     return true;
@@ -116,26 +145,31 @@ bool sequence_timer_cb(struct repeating_timer *t) {
 void gpio_irq_handler(uint gpio, uint32_t events) {
     if (!(events & GPIO_IRQ_EDGE_FALL)) return;
 
-    if (state == IDLE) {
+    game_t *g = game();
+
+    if (g->state == IDLE) {
         if (gpio == BTN_G) {
-            round_len = 1;
-            pnts = 0;
+            g->round_len = 1;
+            g->pnts = 0;
+            g->score_printed = false;
             start_round();
         }
         return;
     }
 
-    if (state != INPUT) return;
+    if (g->state != INPUT) return;
 
-    color_t expected = sequence[input_pos];
+    const color_t *seq = sequence();
+    color_t expected = seq[g->input_pos];
 
     if (button_matches_color(gpio, expected)) {
-        input_pos++;
-        if (input_pos >= round_len) {
-            advance_round_or_finish();
+        g->input_pos++;
+
+        if (g->input_pos >= g->round_len) {
+            complete_round();
         }
     } else {
-        pnts = round_len - 1;
+        g->pnts = (g->round_len > 0) ? (g->round_len - 1) : 0;
         finish_game();
     }
 }
@@ -160,11 +194,14 @@ int main(void) {
     add_repeating_timer_ms(STEP_MS, sequence_timer_cb, NULL, &timer);
 
     while (true) {
-        if (state == OVER && !score_printed) {
-            printf("Points %d\n", pnts);
+        game_t *g = game();
+
+        if (g->state == OVER && !g->score_printed) {
+            printf("Points %d\n", g->pnts);
             fflush(stdout);
-            score_printed = true;
+            g->score_printed = true;
         }
+
         tight_loop_contents();
     }
 }
