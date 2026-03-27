@@ -8,7 +8,6 @@
 const uint8_t BAR_PINS[5] = {2, 3, 4, 5, 6};
 
 volatile int contador = 0;
-volatile uint32_t last_irq_time = 0;
 
 void bar_init(void) {
     for (int i = 0; i < 5; i++) {
@@ -34,10 +33,6 @@ static inline int read_sw_level(void) {
 void gpio_irq_handler(uint gpio, uint32_t events) {
     if (gpio != BTN_PIN) return;
     if (!(events & GPIO_IRQ_EDGE_FALL)) return;
-
-    uint32_t now = time_us_32();
-    if (now - last_irq_time < 200000) return;
-    last_irq_time = now;
 
     int sw = read_sw_level();
 
